@@ -26,7 +26,7 @@ router.post("/create-order", async (req, res) => {
             (sum, item) => sum + getPrice(item.price) * item.quantity,
             0
         );
-        const total = subtotal + 29; // shipping, same as frontend
+        const total = subtotal + 0; // shipping, same as frontend
 
         if (!Number.isFinite(total) || total <= 0) {
             return res.status(400).json({ error: "Invalid order total" });
