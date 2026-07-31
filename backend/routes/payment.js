@@ -2,7 +2,6 @@ const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const Razorpay = require("razorpay");
-const nodemailer = require("nodemailer");
 
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
@@ -27,7 +26,7 @@ router.post("/create-order", async (req, res) => {
             (sum, item) => sum + getPrice(item.price) * item.quantity,
             0
         );
-        const total = subtotal + 0; // shipping, same as frontend
+        const total = subtotal + 29; // shipping, same as frontend
 
         if (!Number.isFinite(total) || total <= 0) {
             return res.status(400).json({ error: "Invalid order total" });
@@ -95,28 +94,26 @@ router.post("/verify-payment", async (req, res) => {
     }
 });
 
-// ── Nodemailer: notify the shop owner of a new order ───────────
+// ── Notify the shop owner of a new order, via Resend's HTTPS API ──
+// We use Resend instead of raw Gmail SMTP because Render (and many
+// other hosts) block or heavily throttle outbound SMTP ports
+// (465/587), which makes nodemailer hang instead of erroring — so
+// no email ever goes out and nothing useful gets logged either.
+// Resend sends over plain HTTPS (port 443), which is never blocked.
 async function notifyOwner(customer, cartItems, totalAmount, paymentId) {
-    try {
-        const transporter = nodemailer.createTransport({
-            host: "smtp.gmail.com",
-            port: 465,
-            secure: true,
-            auth: {
-                user: process.env.GMAIL_USER,
-                pass: process.env.GMAIL_PASS,
-            },
-        });
+    console.log("Attempting to send order notification email...");
 
+    if (!process.env.RESEND_API_KEY || !process.env.OWNER_EMAIL) {
+        console.error("Email skipped: RESEND_API_KEY or OWNER_EMAIL is not set in the environment.");
+        return;
+    }
+
+    try {
         const itemsList = cartItems
             .map(item => `  • ${item.name} x${item.quantity} = Rs.${Number(String(item.price).replace("₹", "").replace(/,/g, "")) * item.quantity}`)
             .join("\n");
 
-        await transporter.sendMail({
-            from: `"IR Punjabi Jutti Orders" <${process.env.GMAIL_USER}>`,
-            to: process.env.OWNER_EMAIL,
-            subject: `🛍️ New Order Received — Rs.${totalAmount} — ${customer.fullName}`,
-            text: `
+        const text = `
 NEW ORDER RECEIVED
 IR Punjabi Jutti
 ─────────────────────────────
@@ -140,13 +137,34 @@ Status       : PAID ✅
 ─────────────────────────────
 
 — IR Punjabi Jutti Notification System
-            `.trim(),
+        `.trim();
+
+        // Resend requires the "from" address to be on a domain you've
+        // verified in your Resend account. Until you verify your own
+        // domain, use "onboarding@resend.dev" as a working placeholder.
+        const fromAddress = process.env.RESEND_FROM_EMAIL || "IR Punjabi Jutti <onboarding@resend.dev>";
+
+        const response = await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                from: fromAddress,
+                to: process.env.OWNER_EMAIL,
+                subject: `🛍️ New Order Received — Rs.${totalAmount} — ${customer.fullName}`,
+                text,
+            }),
         });
+
+        if (!response.ok) {
+            const errBody = await response.text();
+            throw new Error(`Resend API responded ${response.status}: ${errBody}`);
+        }
 
         console.log("✅ Order email sent to owner at", process.env.OWNER_EMAIL);
     } catch (err) {
-        // Log the full error (not just err.message) so auth/connection
-        // issues show up clearly in the Render logs.
         console.error("Email failed:", err);
     }
 }
