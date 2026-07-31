@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const Razorpay = require("razorpay");
+const nodemailer = require("nodemailer");
 
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
@@ -78,12 +79,14 @@ router.post("/verify-payment", async (req, res) => {
         // Payment is genuine at this point.
         // TODO: save the order (customerDetails, cartItems, totalAmount,
         // razorpay_payment_id) to MongoDB here so you have a record even
-        // if the notification email/WhatsApp step below fails.
+        // if the notification email step below fails.
 
         console.log("Verified payment:", razorpay_payment_id, "for", customerDetails?.email);
 
-        // TODO: send order notification email (using GMAIL_USER/GMAIL_PASS)
-        // and/or WhatsApp message to OWNER_WHATSAPP_NUMBER here.
+        // Send order notification email to the shop owner. Awaited so a
+        // failure shows up in logs, but it never blocks the success
+        // response to the customer — the payment is already confirmed.
+        await notifyOwner(customerDetails, cartItems, totalAmount, razorpay_payment_id);
 
         res.json({ success: true });
     } catch (err) {
@@ -91,5 +94,61 @@ router.post("/verify-payment", async (req, res) => {
         res.status(500).json({ success: false, error: "Verification failed" });
     }
 });
+
+// ── Nodemailer: notify the shop owner of a new order ───────────
+async function notifyOwner(customer, cartItems, totalAmount, paymentId) {
+    try {
+        const transporter = nodemailer.createTransport({
+            host: "smtp.gmail.com",
+            port: 465,
+            secure: true,
+            auth: {
+                user: process.env.GMAIL_USER,
+                pass: process.env.GMAIL_PASS,
+            },
+        });
+
+        const itemsList = cartItems
+            .map(item => `  • ${item.name} x${item.quantity} = Rs.${Number(String(item.price).replace("₹", "").replace(/,/g, "")) * item.quantity}`)
+            .join("\n");
+
+        await transporter.sendMail({
+            from: `"IR Punjabi Jutti Orders" <${process.env.GMAIL_USER}>`,
+            to: process.env.OWNER_EMAIL,
+            subject: `🛍️ New Order Received — Rs.${totalAmount} — ${customer.fullName}`,
+            text: `
+NEW ORDER RECEIVED
+IR Punjabi Jutti
+─────────────────────────────
+
+CUSTOMER DETAILS
+Name    : ${customer.fullName}
+Phone   : ${customer.phone}
+Email   : ${customer.email || "Not provided"}
+
+DELIVERY ADDRESS
+${customer.address}
+${customer.city}, ${customer.state} - ${customer.pincode}
+
+ITEMS ORDERED
+${itemsList}
+
+─────────────────────────────
+TOTAL PAID   : Rs. ${totalAmount}
+Payment ID   : ${paymentId}
+Status       : PAID ✅
+─────────────────────────────
+
+— IR Punjabi Jutti Notification System
+            `.trim(),
+        });
+
+        console.log("✅ Order email sent to owner at", process.env.OWNER_EMAIL);
+    } catch (err) {
+        // Log the full error (not just err.message) so auth/connection
+        // issues show up clearly in the Render logs.
+        console.error("Email failed:", err);
+    }
+}
 
 module.exports = router;
